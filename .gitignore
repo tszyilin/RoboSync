@@ -1,4 +1,7 @@
 RoboSync.exe
 config.txt
 queue.txt
+version.txt
 log/
+_RoboSync_new.*
+_update.bat

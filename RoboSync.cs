@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -203,6 +205,10 @@ class MainForm : Form
     long            _latestFileSize = 0;
     System.Windows.Forms.Timer _progressTimer;
 
+    // ── Update ────────────────────────────────────────────────────────────────
+    Button btnUpdate;
+    string _localSha = "";
+
     // ── Queue tab controls ────────────────────────────────────────────────────
     TextBox          tbQLocal, tbQServer;
     RadioButton      rbQDirL2S, rbQDirS2L, rbQDirMove;
@@ -249,6 +255,7 @@ class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
 
         BuildUI();
+        LoadVersion();
 
         string src, dst;
         Config.Load(out src, out dst);
@@ -300,9 +307,24 @@ class MainForm : Form
             Location = new Point(66, 32),
         };
 
+        btnUpdate = new Button {
+            Text      = "⟳ Update",
+            Anchor    = AnchorStyles.Right | AnchorStyles.Top,
+            Size      = new Size(100, 28),
+            Location  = new Point(1080 - 110, 12),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = C.Overlay,
+            ForeColor = C.Text,
+            Font      = new Font("Segoe UI", 8.5f),
+            Cursor    = Cursors.Hand,
+        };
+        btnUpdate.FlatAppearance.BorderColor = C.Muted;
+        btnUpdate.Click += delegate { CheckForUpdate(); };
+
         titlePanel.Controls.Add(iconBlock);
         titlePanel.Controls.Add(lblTitle);
         titlePanel.Controls.Add(lblSub);
+        titlePanel.Controls.Add(btnUpdate);
 
         // Amber bottom border line
         titlePanel.Paint += delegate(object s, PaintEventArgs pe) {
@@ -1826,5 +1848,123 @@ class MainForm : Form
     {
         if (!string.IsNullOrEmpty(currentLogFile) && File.Exists(currentLogFile))
             Process.Start(currentLogFile);
+    }
+
+    // ── Self-update ───────────────────────────────────────────────────────────
+    void LoadVersion()
+    {
+        string vf = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "version.txt");
+        if (File.Exists(vf)) _localSha = File.ReadAllText(vf).Trim();
+    }
+
+    void CheckForUpdate()
+    {
+        btnUpdate.Enabled = false;
+        btnUpdate.Text    = "Checking...";
+        ThreadPool.QueueUserWorkItem(delegate {
+            try
+            {
+                var    wc        = new WebClient();
+                wc.Headers["User-Agent"] = "RoboSync-Updater";
+                string json      = wc.DownloadString("https://api.github.com/repos/tszyilin/RoboSync/commits/main");
+                var    match     = Regex.Match(json, "\"sha\":\\s*\"([0-9a-f]+)\"");
+                string remoteSha = match.Success ? match.Groups[1].Value : "";
+
+                Invoke(new Action(delegate {
+                    btnUpdate.Enabled = true;
+                    btnUpdate.Text    = "⟳ Update";
+                    if (string.IsNullOrEmpty(remoteSha)) {
+                        MessageBox.Show("Could not read version from GitHub.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    bool upToDate = !string.IsNullOrEmpty(_localSha) &&
+                                    (remoteSha.StartsWith(_localSha) || _localSha.StartsWith(remoteSha));
+                    if (upToDate) {
+                        MessageBox.Show("Already up to date.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+                    string local7  = _localSha.Length >= 7  ? _localSha.Substring(0, 7)  : "(unknown)";
+                    string remote7 = remoteSha.Length  >= 7 ? remoteSha.Substring(0, 7)  : remoteSha;
+                    string msg = "A new version is available.\n\n" +
+                                 "Current: " + local7 + "\n" +
+                                 "Latest:  " + remote7 + "\n\n" +
+                                 "Download, compile, and restart now?";
+                    if (MessageBox.Show(msg, "Update Available", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                        DoUpdate(remoteSha);
+                }));
+            }
+            catch (Exception ex)
+            {
+                Invoke(new Action(delegate {
+                    btnUpdate.Enabled = true;
+                    btnUpdate.Text    = "⟳ Update";
+                    MessageBox.Show("Update check failed:\n" + ex.Message, "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }));
+            }
+        });
+    }
+
+    void DoUpdate(string newSha)
+    {
+        btnUpdate.Enabled = false;
+        btnUpdate.Text    = "Updating...";
+        string exeDir  = Path.GetDirectoryName(Application.ExecutablePath);
+        string newCs   = Path.Combine(exeDir, "_RoboSync_new.cs");
+        string newExe  = Path.Combine(exeDir, "_RoboSync_new.exe");
+        string batFile = Path.Combine(exeDir, "_update.bat");
+        string csc     = @"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe";
+        string icoFile = Path.Combine(exeDir, "RoboSync.ico");
+        string exePath = Application.ExecutablePath;
+
+        ThreadPool.QueueUserWorkItem(delegate {
+            try
+            {
+                var wc = new WebClient();
+                wc.Headers["User-Agent"] = "RoboSync-Updater";
+                wc.DownloadFile("https://raw.githubusercontent.com/tszyilin/RoboSync/main/RoboSync.cs", newCs);
+
+                string icoArg      = File.Exists(icoFile) ? " /win32icon:\"" + icoFile + "\"" : "";
+                string compileArgs = "/target:winexe /out:\"" + newExe + "\"" + icoArg +
+                                     " /r:System.Windows.Forms.dll /r:System.Drawing.dll \"" + newCs + "\"";
+                var proc = Process.Start(new ProcessStartInfo(csc, compileArgs) {
+                    UseShellExecute = false, CreateNoWindow = true });
+                proc.WaitForExit();
+
+                if (!File.Exists(newExe) || proc.ExitCode != 0) {
+                    Invoke(new Action(delegate {
+                        btnUpdate.Enabled = true;
+                        btnUpdate.Text    = "⟳ Update";
+                        MessageBox.Show("Compilation failed.", "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                    if (File.Exists(newCs)) File.Delete(newCs);
+                    return;
+                }
+
+                File.WriteAllText(Path.Combine(exeDir, "version.txt"), newSha);
+                File.WriteAllText(batFile,
+                    "@echo off\r\n" +
+                    "timeout /t 2 /nobreak >nul\r\n" +
+                    "copy /y \"" + newExe  + "\" \"" + exePath + "\"\r\n" +
+                    "del \""     + newExe  + "\"\r\n" +
+                    "del \""     + newCs   + "\"\r\n" +
+                    "start \"\" \"" + exePath + "\"\r\n" +
+                    "del \"%~f0\"\r\n");
+
+                Invoke(new Action(delegate {
+                    Process.Start(batFile);
+                    Application.Exit();
+                }));
+            }
+            catch (Exception ex)
+            {
+                Invoke(new Action(delegate {
+                    btnUpdate.Enabled = true;
+                    btnUpdate.Text    = "⟳ Update";
+                    MessageBox.Show("Update failed:\n" + ex.Message, "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    if (File.Exists(newCs))  File.Delete(newCs);
+                    if (File.Exists(newExe)) File.Delete(newExe);
+                }));
+            }
+        });
     }
 }
