@@ -1867,6 +1867,7 @@ class MainForm : Form
         ThreadPool.QueueUserWorkItem(delegate {
             try
             {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
                 var    wc        = new WebClient();
                 wc.Headers["User-Agent"] = "RoboSync-Updater";
                 string json      = wc.DownloadString("https://api.github.com/repos/tszyilin/RoboSync/commits/main");
@@ -1922,6 +1923,7 @@ class MainForm : Form
         ThreadPool.QueueUserWorkItem(delegate {
             try
             {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
                 var wc = new WebClient();
                 wc.Headers["User-Agent"] = "RoboSync-Updater";
                 wc.DownloadFile("https://raw.githubusercontent.com/tszyilin/RoboSync/main/RoboSync.cs", newCs);
