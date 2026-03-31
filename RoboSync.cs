@@ -311,7 +311,7 @@ class MainForm : Form
             Text      = "⟳ Update",
             Anchor    = AnchorStyles.Right | AnchorStyles.Top,
             Size      = new Size(100, 28),
-            Location  = new Point(1080 - 110, 12),
+            Location  = new Point(900, 12),
             FlatStyle = FlatStyle.Flat,
             BackColor = C.Overlay,
             ForeColor = C.Text,
@@ -320,6 +320,9 @@ class MainForm : Form
         };
         btnUpdate.FlatAppearance.BorderColor = C.Muted;
         btnUpdate.Click += delegate { CheckForUpdate(); };
+        titlePanel.SizeChanged += delegate {
+            btnUpdate.Left = titlePanel.Width - 110;
+        };
 
         titlePanel.Controls.Add(iconBlock);
         titlePanel.Controls.Add(lblTitle);
