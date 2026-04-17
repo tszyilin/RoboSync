@@ -72,6 +72,18 @@ static class Config
     }
 }
 
+// ─── History entry ───────────────────────────────────────────────────────────
+class HistoryEntry
+{
+    public DateTime StartTime;
+    public string   Source;
+    public string   Destination;
+    public string   Direction;   // human-readable label, e.g. "Local -> Server [COPY]"
+    public string   Mode;        // folder / file
+    public string   Status;      // Done / Failed / Stopped
+    public string   LogFile;
+}
+
 // ─── Queue item ──────────────────────────────────────────────────────────────
 class QueueItem
 {
@@ -209,6 +221,14 @@ class MainForm : Form
     Button btnUpdate;
     string _localSha = "";
 
+    // ── History tab controls ──────────────────────────────────────────────────
+    ListView           lvHistory;
+    List<HistoryEntry> _history = new List<HistoryEntry>();
+    // Captured at sync/queue start so Finish() can write the history record
+    string   _syncSrc = "", _syncDst = "", _syncLabel = "", _syncMode = "";
+    DateTime _syncStartTime;
+    DateTime _queueStartTime;
+
     // ── Queue tab controls ────────────────────────────────────────────────────
     TextBox          tbQLocal, tbQServer;
     RadioButton      rbQDirL2S, rbQDirS2L, rbQDirMove;
@@ -246,6 +266,11 @@ class MainForm : Form
         get { return Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "queue.txt"); }
     }
 
+    static string HistoryFile
+    {
+        get { return Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "history.txt"); }
+    }
+
     public MainForm()
     {
         Text          = "RoboSync";
@@ -265,6 +290,7 @@ class MainForm : Form
         tbServer.Text = dst;
 
         LoadQueue();
+        LoadHistory();
 
         Shown += delegate {
             if (_syncMain != null) UpdateSyncLayout(_syncMain);
@@ -345,21 +371,28 @@ class MainForm : Form
             Dock = DockStyle.Top, Height = 36, BackColor = C.Bg,
         };
 
-        Button btnTabSync  = null;
-        Button btnTabQueue = null;
-        Panel  syncPanel   = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg, Visible = true  };
-        Panel  queuePanel  = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg, Visible = false };
+        Button btnTabSync    = null;
+        Button btnTabQueue   = null;
+        Button btnTabHistory = null;
+        Panel  syncPanel     = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg, Visible = true  };
+        Panel  queuePanel    = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg, Visible = false };
+        Panel  historyPanel  = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg, Visible = false };
 
-        Action<bool> switchTab = delegate(bool showSync) {
-            syncPanel.Visible  =  showSync;
-            queuePanel.Visible = !showSync;
-            // Repaint both buttons
-            if (btnTabSync  != null) btnTabSync.Invalidate();
-            if (btnTabQueue != null) btnTabQueue.Invalidate();
+        // 0=Sync  1=Queue  2=History  — stored in array so closures can read the latest value
+        int[] activeTab = new int[] { 0 };
+
+        Action<int> switchTab = delegate(int idx) {
+            activeTab[0]         = idx;
+            syncPanel.Visible    = (idx == 0);
+            queuePanel.Visible   = (idx == 1);
+            historyPanel.Visible = (idx == 2);
+            if (btnTabSync    != null) btnTabSync.Invalidate();
+            if (btnTabQueue   != null) btnTabQueue.Invalidate();
+            if (btnTabHistory != null) btnTabHistory.Invalidate();
         };
 
-        Action<Button, string, bool> makeTab = null;
-        makeTab = delegate(Button btn, string label, bool isSync) {
+        Action<Button, string, int> makeTab = null;
+        makeTab = delegate(Button btn, string label, int idx) {
             btn.Text      = label;
             btn.FlatStyle = FlatStyle.Flat;
             btn.BackColor = C.Bg;
@@ -367,14 +400,14 @@ class MainForm : Form
             btn.Font      = new Font("Segoe UI", 10, FontStyle.Bold);
             btn.Size      = new Size(110, 36);
             btn.Cursor    = Cursors.Hand;
-            btn.FlatAppearance.BorderSize       = 0;
-            btn.FlatAppearance.MouseOverBackColor = C.Surface;
-            bool capturedIsSync = isSync;
-            btn.Click += delegate { switchTab(capturedIsSync); };
+            btn.FlatAppearance.BorderSize         = 0;
+            btn.FlatAppearance.MouseOverBackColor  = C.Surface;
+            int capturedIdx = idx;
+            btn.Click += delegate { switchTab(capturedIdx); };
             btn.Paint += delegate(object s, PaintEventArgs pe) {
-                Button b       = (Button)s;
-                bool   active  = (capturedIsSync ? syncPanel.Visible : queuePanel.Visible);
-                b.ForeColor    = active ? C.Accent : C.Muted;
+                Button b      = (Button)s;
+                bool   active = (activeTab[0] == capturedIdx);
+                b.ForeColor   = active ? C.Accent : C.Muted;
                 if (active)
                 {
                     using (var pen = new System.Drawing.Pen(C.Accent, 2))
@@ -384,12 +417,15 @@ class MainForm : Form
             tabBar.Controls.Add(btn);
         };
 
-        btnTabSync  = new Button();
-        btnTabQueue = new Button();
-        makeTab(btnTabSync,  "  Sync",  true);
-        makeTab(btnTabQueue, "  Queue", false);
-        btnTabSync.Location  = new Point(0,   0);
-        btnTabQueue.Location = new Point(110, 0);
+        btnTabSync    = new Button();
+        btnTabQueue   = new Button();
+        btnTabHistory = new Button();
+        makeTab(btnTabSync,    "  Sync",    0);
+        makeTab(btnTabQueue,   "  Queue",   1);
+        makeTab(btnTabHistory, "  History", 2);
+        btnTabSync.Location    = new Point(0,   0);
+        btnTabQueue.Location   = new Point(110, 0);
+        btnTabHistory.Location = new Point(220, 0);
 
         // Thin separator line at bottom of tab bar
         tabBar.Paint += delegate(object s, PaintEventArgs pe) {
@@ -398,8 +434,9 @@ class MainForm : Form
                 pe.Graphics.DrawLine(pen, 0, p.Height - 1, p.Width, p.Height - 1);
         };
 
-        // Content area holds both panels (only one visible at a time)
+        // Content area holds all panels (only one visible at a time)
         var contentArea = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg };
+        contentArea.Controls.Add(historyPanel);
         contentArea.Controls.Add(queuePanel);
         contentArea.Controls.Add(syncPanel);
 
@@ -410,6 +447,7 @@ class MainForm : Form
 
         BuildSyncTab(syncPanel);
         BuildQueueTab(queuePanel);
+        BuildHistoryTab(historyPanel);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1308,6 +1346,11 @@ class MainForm : Form
         if (_runningItem != null)
         {
             _runningItem.Status = "Failed";
+            // Record to history
+            string qhSrc = (_runningItem.Direction != "s2l") ? _runningItem.LocalPath  : _runningItem.ServerPath;
+            string qhDst = (_runningItem.Direction != "s2l") ? _runningItem.ServerPath : _runningItem.LocalPath;
+            AddHistoryEntry(qhSrc, qhDst, _runningItem.DirectionLabel + "  [Queue]",
+                            _runningItem.Mode, _queueStartTime, "Stopped", "");
             _runningItem = null;
         }
 
@@ -1324,9 +1367,10 @@ class MainForm : Form
     {
         if (_isRunning) return;
 
-        _isRunning    = true;
-        _runningItem  = item;
-        item.Status   = "Running";
+        _isRunning      = true;
+        _runningItem    = item;
+        _queueStartTime = DateTime.Now;
+        item.Status     = "Running";
         RefreshQueueListView();
         SaveQueue();
 
@@ -1534,6 +1578,13 @@ class MainForm : Form
         }
         AppendQLog("\n  Log: " + logFile + "\n", C.Muted);
 
+        // Record to history (for RepeatDaily, record each individual run as Done)
+        string histSrc = (item.Direction != "s2l") ? item.LocalPath  : item.ServerPath;
+        string histDst = (item.Direction != "s2l") ? item.ServerPath : item.LocalPath;
+        string histDir = item.DirectionLabel + (item.Mode == "file" ? "" : "") + "  [Queue]";
+        AddHistoryEntry(histSrc, histDst, histDir, item.Mode,
+                        _queueStartTime, item.Status == "Pending" ? "Done" : item.Status, logFile);
+
         _runningItem  = null;
         _isRunning    = false;
         RefreshQueueListView();
@@ -1560,6 +1611,207 @@ class MainForm : Form
         btnQReuse.Enabled      = enabled;
         btnQEditSched.Enabled  = enabled;
         btnQClearAll.Enabled   = enabled;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // HISTORY TAB
+    // ══════════════════════════════════════════════════════════════════════════
+    void BuildHistoryTab(Panel page)
+    {
+        var main = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg,
+                               Padding = new Padding(18, 12, 18, 8) };
+        page.Controls.Add(main);
+
+        int y = 0;
+
+        // Section label
+        var lblSec = new Label { Text = "TRANSFER HISTORY", ForeColor = C.Muted, AutoSize = true,
+                                  Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+                                  Top = y, Left = 0 };
+        main.Controls.Add(lblSec);
+        y += 22;
+
+        // Subtitle
+        var lblSub = new Label {
+            Text = "All completed syncs (Sync tab + Queue tab) — newest first.",
+            ForeColor = C.Muted, AutoSize = true,
+            Font = new Font("Segoe UI", 8.5f),
+            Top = y, Left = 0,
+        };
+        main.Controls.Add(lblSub);
+        y += 22;
+
+        // ListView
+        lvHistory = new ListView {
+            Top        = y, Left = 0,
+            View       = View.Details,
+            FullRowSelect = true,
+            GridLines  = true,
+            BackColor  = C.Black,
+            ForeColor  = C.Text,
+            BorderStyle = BorderStyle.None,
+            Font       = new Font("Consolas", 9),
+            Anchor     = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top | AnchorStyles.Bottom,
+        };
+        lvHistory.Columns.Add("Date / Time",  148);
+        lvHistory.Columns.Add("Source",       200);
+        lvHistory.Columns.Add("Destination",  200);
+        lvHistory.Columns.Add("Type",         160);
+        lvHistory.Columns.Add("Mode",          60);
+        lvHistory.Columns.Add("Status",        70);
+        main.Controls.Add(lvHistory);
+
+        // Bottom button row — anchored to bottom
+        var btnRow = new FlowLayoutPanel {
+            BackColor = C.Bg, AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
+        };
+
+        var btnOpenLog = new Button {
+            Text = "Open Log", ForeColor = C.Accent, BackColor = C.Overlay,
+            AutoSize = true, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+            Margin = new Padding(0, 0, 6, 0), Padding = new Padding(8, 2, 8, 2),
+        };
+        btnOpenLog.FlatAppearance.BorderSize = 0;
+        btnOpenLog.Click += delegate { HistoryOpenLog(); };
+
+        var btnClear = new Button {
+            Text = "Clear History", ForeColor = C.Red, BackColor = C.Overlay,
+            AutoSize = true, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+            Margin = new Padding(0, 0, 6, 0), Padding = new Padding(8, 2, 8, 2),
+        };
+        btnClear.FlatAppearance.BorderSize = 0;
+        btnClear.Click += delegate { HistoryClear(); };
+
+        btnRow.Controls.Add(btnOpenLog);
+        btnRow.Controls.Add(btnClear);
+        main.Controls.Add(btnRow);
+
+        // Layout: lvHistory fills remaining height, btnRow pins to bottom
+        main.Resize += delegate {
+            int bh = btnRow.Height + 8;
+            lvHistory.Height = Math.Max(60, main.ClientSize.Height
+                                            - main.Padding.Vertical - y - bh - 4);
+            lvHistory.Width  = main.ClientSize.Width - main.Padding.Horizontal;
+            btnRow.Top  = lvHistory.Bottom + 6;
+            btnRow.Left = 0;
+        };
+    }
+
+    // ── History actions ───────────────────────────────────────────────────────
+    void HistoryOpenLog()
+    {
+        if (lvHistory.SelectedItems.Count == 0) return;
+        var entry = (HistoryEntry)lvHistory.SelectedItems[0].Tag;
+        if (!string.IsNullOrEmpty(entry.LogFile) && File.Exists(entry.LogFile))
+            Process.Start(entry.LogFile);
+        else
+            MessageBox.Show("Log file not found:\n" + entry.LogFile, "Missing Log",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    void HistoryClear()
+    {
+        if (_history.Count == 0) return;
+        if (MessageBox.Show("Clear all history entries?", "Clear History",
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        _history.Clear();
+        SaveHistory();
+        RefreshHistoryView();
+    }
+
+    // ── History persistence ───────────────────────────────────────────────────
+    void AddHistoryEntry(string src, string dst, string direction, string mode,
+                         DateTime startTime, string status, string logFile)
+    {
+        var e = new HistoryEntry {
+            StartTime   = startTime,
+            Source      = src,
+            Destination = dst,
+            Direction   = direction,
+            Mode        = mode,
+            Status      = status,
+            LogFile     = logFile,
+        };
+        // Insert newest first
+        _history.Insert(0, e);
+        // Keep at most 200 entries
+        while (_history.Count > 200) _history.RemoveAt(_history.Count - 1);
+        SaveHistory();
+        RefreshHistoryView();
+    }
+
+    void SaveHistory()
+    {
+        try
+        {
+            var lines = new List<string>();
+            foreach (HistoryEntry e in _history)
+            {
+                lines.Add(e.StartTime.ToString("yyyy-MM-dd HH:mm:ss") + "|" +
+                          e.Source      + "|" +
+                          e.Destination + "|" +
+                          e.Direction   + "|" +
+                          e.Mode        + "|" +
+                          e.Status      + "|" +
+                          e.LogFile);
+            }
+            File.WriteAllLines(HistoryFile, lines.ToArray());
+        }
+        catch { }
+    }
+
+    void LoadHistory()
+    {
+        if (!File.Exists(HistoryFile)) return;
+        try
+        {
+            foreach (string raw in File.ReadAllLines(HistoryFile))
+            {
+                string line = raw.Trim();
+                if (line.Length == 0) continue;
+                string[] p = line.Split('|');
+                if (p.Length < 7) continue;
+                DateTime dt;
+                if (!DateTime.TryParse(p[0].Trim(), out dt)) continue;
+                _history.Add(new HistoryEntry {
+                    StartTime   = dt,
+                    Source      = p[1].Trim(),
+                    Destination = p[2].Trim(),
+                    Direction   = p[3].Trim(),
+                    Mode        = p[4].Trim(),
+                    Status      = p[5].Trim(),
+                    LogFile     = p[6].Trim(),
+                });
+            }
+            RefreshHistoryView();
+        }
+        catch { }
+    }
+
+    void RefreshHistoryView()
+    {
+        if (lvHistory == null) return;
+        lvHistory.Items.Clear();
+        foreach (HistoryEntry e in _history)
+        {
+            var lvi = new ListViewItem(e.StartTime.ToString("yyyy-MM-dd  HH:mm"));
+            lvi.SubItems.Add(e.Source);
+            lvi.SubItems.Add(e.Destination);
+            lvi.SubItems.Add(e.Direction);
+            lvi.SubItems.Add(e.Mode);
+            lvi.SubItems.Add(e.Status);
+            lvi.Tag = e;
+
+            if      (e.Status == "Done")    lvi.ForeColor = C.Green;
+            else if (e.Status == "Failed")  lvi.ForeColor = C.Red;
+            else if (e.Status == "Stopped") lvi.ForeColor = C.Muted;
+            else                            lvi.ForeColor = C.Text;
+
+            lvHistory.Items.Add(lvi);
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1754,6 +2006,14 @@ class MainForm : Form
         }
 
         Config.Save(local, server);
+
+        // Capture for history recording when Finish() / StopSync() fires
+        _syncSrc       = (mode != "server_to_local") ? local  : server;
+        _syncDst       = (mode != "server_to_local") ? server : local;
+        _syncLabel     = label;
+        _syncMode      = isFolder ? "folder" : "file";
+        _syncStartTime = DateTime.Now;
+
         _isRunning = true;
         SetSyncButtonsEnabled(false);
         SetQueueButtonsEnabled(false);
@@ -1957,6 +2217,11 @@ class MainForm : Form
             SetStatus("Error (code " + rc + ")", C.Red);
         }
         AppendLog("\n  Log: " + logFile + "\n", C.Muted);
+
+        // Record to history
+        string histStatus = rc <= 7 ? "Done" : "Failed";
+        AddHistoryEntry(_syncSrc, _syncDst, _syncLabel, _syncMode, _syncStartTime, histStatus, logFile);
+
         SetSyncButtonsEnabled(true);
         SetQueueButtonsEnabled(true);
         btnOpenLog.Enabled = true;
@@ -2003,6 +2268,7 @@ class MainForm : Form
         AppendLog(divider + "\n", C.Muted);
 
         SetStatus("Stopped", C.Red);
+        AddHistoryEntry(_syncSrc, _syncDst, _syncLabel, _syncMode, _syncStartTime, "Stopped", currentLogFile);
         SetSyncButtonsEnabled(true);
         SetQueueButtonsEnabled(true);
         btnOpenLog.Enabled   = true;

@@ -1,6 +1,7 @@
 RoboSync.exe
 config.txt
 queue.txt
+history.txt
 version.txt
 log/
 _RoboSync_new.*
