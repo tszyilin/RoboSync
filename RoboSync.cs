@@ -220,6 +220,8 @@ class MainForm : Form
     Button           btnAddToQueue;
     ListView         lvQueue;
     Button           btnQRemove, btnQRunNow, btnQClearAll, btnQStop;
+    Button           btnQReuse, btnQEditSched;
+    Panel            _queueScroll;
     Label            lblQFile;
     ProgressBar      pbQueue;
     Label            lblQPct;
@@ -633,6 +635,7 @@ class MainForm : Form
     {
         var scroll = new Panel { Dock = DockStyle.Fill, BackColor = C.Bg,
                                   AutoScroll = true, Padding = new Padding(18, 12, 18, 8) };
+        _queueScroll = scroll;
         page.Controls.Add(scroll);
 
         int y = 0;
@@ -820,17 +823,23 @@ class MainForm : Form
                                              BackColor = C.Bg,
                                              FlowDirection = FlowDirection.LeftToRight };
         qBtnRow.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        btnQRemove  = QSmallBtn("Remove Selected", C.Red);
-        btnQRunNow  = QSmallBtn("Run Selected Now", C.Green);
-        btnQClearAll= QSmallBtn("Clear All",        C.Muted);
-        btnQStop    = QSmallBtn("Stop",             C.Red);
+        btnQRemove    = QSmallBtn("Remove Selected",  C.Red);
+        btnQRunNow    = QSmallBtn("Run Selected Now", C.Green);
+        btnQReuse     = QSmallBtn("↺ Reuse",          C.Accent);
+        btnQEditSched = QSmallBtn("✎ Edit Time",       C.Yellow);
+        btnQClearAll  = QSmallBtn("Clear All",         C.Muted);
+        btnQStop      = QSmallBtn("Stop",              C.Red);
         btnQStop.Enabled = false;
-        btnQRemove.Click   += delegate { QueueRemoveSelected(); };
-        btnQRunNow.Click   += delegate { QueueRunSelectedNow(); };
-        btnQClearAll.Click += delegate { QueueClearAll(); };
-        btnQStop.Click     += delegate { QueueStop(); };
+        btnQRemove.Click    += delegate { QueueRemoveSelected(); };
+        btnQRunNow.Click    += delegate { QueueRunSelectedNow(); };
+        btnQReuse.Click     += delegate { QueueReuseSelected(); };
+        btnQEditSched.Click += delegate { QueueEditSchedule(); };
+        btnQClearAll.Click  += delegate { QueueClearAll(); };
+        btnQStop.Click      += delegate { QueueStop(); };
         qBtnRow.Controls.Add(btnQRemove);
         qBtnRow.Controls.Add(btnQRunNow);
+        qBtnRow.Controls.Add(btnQReuse);
+        qBtnRow.Controls.Add(btnQEditSched);
         qBtnRow.Controls.Add(btnQClearAll);
         qBtnRow.Controls.Add(btnQStop);
         scroll.Controls.Add(qBtnRow);
@@ -1048,8 +1057,7 @@ class MainForm : Form
                 string[] parts = line.Split('|');
                 if (parts.Length < 6) continue;
                 string status = parts[5].Trim();
-                if (status == "Done" || status == "Failed") continue;
-                if (status == "Running") status = "Pending";
+                if (status == "Running") status = "Pending"; // crashed mid-run → reset
 
                 DateTime dt;
                 if (!DateTime.TryParse(parts[4].Trim(), out dt)) dt = DateTime.Now;
@@ -1126,6 +1134,159 @@ class MainForm : Form
         foreach (QueueItem item in toRemove) _queue.Remove(item);
         SaveQueue();
         RefreshQueueListView();
+    }
+
+    // ── Reuse: pre-fill the Add form from the selected item ──────────────────
+    void QueueReuseSelected()
+    {
+        if (lvQueue.SelectedItems.Count == 0)
+        {
+            MessageBox.Show("Select a queue item to reuse.", "No Selection",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        QueueItem item = (QueueItem)lvQueue.SelectedItems[0].Tag;
+
+        tbQLocal.Text  = item.LocalPath;
+        tbQServer.Text = item.ServerPath;
+
+        rbQDirL2S.Checked  = (item.Direction == "l2s");
+        rbQDirS2L.Checked  = (item.Direction == "s2l");
+        rbQDirMove.Checked = (item.Direction == "move");
+
+        rbQModeFolder.Checked = (item.Mode == "folder");
+        rbQModeFile.Checked   = (item.Mode == "file");
+
+        // Default to Run Now so user can just click Add or adjust schedule
+        rbQRunNow.Checked = true;
+
+        // Scroll to top so the Add form is visible
+        if (_queueScroll != null)
+            _queueScroll.AutoScrollPosition = new Point(0, 0);
+    }
+
+    // ── Edit schedule / retry: change time for any queue item ────────────────
+    void QueueEditSchedule()
+    {
+        if (lvQueue.SelectedItems.Count == 0)
+        {
+            MessageBox.Show("Select a queue item to edit.", "No Selection",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        QueueItem item = (QueueItem)lvQueue.SelectedItems[0].Tag;
+        if (item.Status == "Running")
+        {
+            MessageBox.Show("Cannot edit a running item.", "Busy",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // Build a small schedule-editor dialog
+        var dlg = new Form {
+            Text            = "Edit Schedule  —  " + item.DirectionLabel,
+            Size            = new Size(440, 230),
+            BackColor       = C.Surface,
+            ForeColor       = C.Text,
+            Font            = new Font("Segoe UI", 9.5f),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition   = FormStartPosition.CenterParent,
+            MaximizeBox     = false,
+            MinimizeBox     = false,
+        };
+
+        var rbNow = new RadioButton {
+            Text = "Run as soon as possible", Left = 14, Top = 18,
+            AutoSize = true, ForeColor = C.Text, BackColor = C.Surface,
+        };
+        var rbSched = new RadioButton {
+            Text = "Schedule:", Left = 14, Top = 50,
+            AutoSize = true, ForeColor = C.Accent, BackColor = C.Surface,
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+        };
+
+        DateTime initTime = (item.ScheduledTime > DateTime.Now)
+            ? item.ScheduledTime
+            : DateTime.Now.AddMinutes(30);
+
+        var dtpDate = new DateTimePicker {
+            Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd",
+            Left = 110, Top = 48, Width = 135,
+            Value = initTime,
+            BackColor = C.Overlay, ForeColor = C.Text,
+        };
+        var dtpTime = new DateTimePicker {
+            Format = DateTimePickerFormat.Custom, CustomFormat = "HH:mm",
+            ShowUpDown = true, Left = 252, Top = 48, Width = 72,
+            Value = initTime,
+            BackColor = C.Overlay, ForeColor = C.Text,
+        };
+
+        var cbRepeat = new CheckBox {
+            Text = "Repeat every day", Left = 14, Top = 88,
+            Checked = item.RepeatDaily, AutoSize = true,
+            ForeColor = C.Accent, BackColor = C.Surface,
+        };
+
+        // Initialise radio based on current state
+        bool wasAsap = (item.Status == "Pending" && item.ScheduledTime <= DateTime.Now);
+        rbNow.Checked   = wasAsap || item.Status == "Done" || item.Status == "Failed";
+        rbSched.Checked = !rbNow.Checked;
+        dtpDate.Enabled = rbSched.Checked;
+        dtpTime.Enabled = rbSched.Checked;
+
+        rbNow.CheckedChanged += delegate {
+            dtpDate.Enabled = rbSched.Checked;
+            dtpTime.Enabled = rbSched.Checked;
+        };
+
+        string hint = (item.Status == "Done" || item.Status == "Failed")
+            ? "Saving will reset status to Pending and re-queue the item."
+            : "";
+        var lblHint = new Label {
+            Text = hint, Left = 14, Top = 116,
+            Width = 400, Height = 28, AutoSize = false,
+            ForeColor = C.Yellow, Font = new Font("Segoe UI", 8.5f, FontStyle.Italic),
+        };
+
+        var btnOk = new Button {
+            Text = "Save", DialogResult = DialogResult.OK,
+            Left = 230, Top = 156, Width = 84, Height = 28,
+            BackColor = C.Accent, ForeColor = C.Black,
+            FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+        };
+        btnOk.FlatAppearance.BorderSize = 0;
+        var btnCancel = new Button {
+            Text = "Cancel", DialogResult = DialogResult.Cancel,
+            Left = 322, Top = 156, Width = 84, Height = 28,
+            BackColor = C.Overlay, ForeColor = C.Text, FlatStyle = FlatStyle.Flat,
+        };
+        btnCancel.FlatAppearance.BorderSize = 0;
+
+        dlg.Controls.AddRange(new Control[] {
+            rbNow, rbSched, dtpDate, dtpTime, cbRepeat, lblHint, btnOk, btnCancel
+        });
+        dlg.AcceptButton = btnOk;
+        dlg.CancelButton = btnCancel;
+
+        if (dlg.ShowDialog(this) == DialogResult.OK)
+        {
+            if (rbNow.Checked)
+                item.ScheduledTime = DateTime.Now;
+            else
+                item.ScheduledTime = dtpDate.Value.Date
+                    .AddHours(dtpTime.Value.Hour)
+                    .AddMinutes(dtpTime.Value.Minute);
+
+            item.RepeatDaily = cbRepeat.Checked;
+
+            // Reset Done/Failed so scheduler will pick it up again
+            if (item.Status == "Done" || item.Status == "Failed")
+                item.Status = "Pending";
+
+            SaveQueue();
+            RefreshQueueListView();
+        }
     }
 
     void QueueStop()
@@ -1393,10 +1554,12 @@ class MainForm : Form
 
     void SetQueueButtonsEnabled(bool enabled)
     {
-        btnAddToQueue.Enabled = enabled;
-        btnQRemove.Enabled    = enabled;
-        btnQRunNow.Enabled    = enabled;
-        btnQClearAll.Enabled  = enabled;
+        btnAddToQueue.Enabled  = enabled;
+        btnQRemove.Enabled     = enabled;
+        btnQRunNow.Enabled     = enabled;
+        btnQReuse.Enabled      = enabled;
+        btnQEditSched.Enabled  = enabled;
+        btnQClearAll.Enabled   = enabled;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
