@@ -1394,7 +1394,7 @@ class MainForm : Form
             if (item.Direction == "move")
                 args = Quote(src) + " " + Quote(dst) + " /E /MOVE /R:3 /W:5 /TEE /LOG:" + Quote(logFile);
             else
-                args = Quote(src) + " " + Quote(dst) + " /E /R:3 /W:5 /TEE /LOG:" + Quote(logFile);
+                args = Quote(src) + " " + Quote(dst) + " /E /XO /R:3 /W:5 /TEE /LOG:" + Quote(logFile);
         }
         else
         {
@@ -1972,8 +1972,8 @@ class MainForm : Form
             }
             else
             {
-                args  = Quote(src) + " " + Quote(dst) + " /E /R:3 /W:5 /TEE /LOG:" + Quote(logFile);
-                label = (mode == "local_to_server") ? "Local -> Server  [COPY]" : "Server -> Local  [COPY]";
+                args  = Quote(src) + " " + Quote(dst) + " /E /XO /R:3 /W:5 /TEE /LOG:" + Quote(logFile);
+                label = (mode == "local_to_server") ? "Local -> Server  [SYNC]" : "Server -> Local  [SYNC]";
             }
         }
         else
