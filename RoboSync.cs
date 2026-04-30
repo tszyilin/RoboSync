@@ -216,6 +216,9 @@ class MainForm : Form
     volatile bool   _fileChanged    = false;
     long            _latestFileSize = 0;
     System.Windows.Forms.Timer _progressTimer;
+    // Inline % update in sync log
+    int             _logFileLineStart = -1;   // RTB char position of current file line
+    int             _lastLogPct       = -1;   // last pct written into that line
 
     // ── Update ────────────────────────────────────────────────────────────────
     Button btnUpdate;
@@ -260,6 +263,9 @@ class MainForm : Form
     volatile bool   _qFileChanged = false;
     long            _qLatestFileSize = 0;
     System.Windows.Forms.Timer _qProgressTimer;
+    // Inline % update in queue log
+    int             _qLogFileLineStart = -1;
+    int             _lastQLogPct       = -1;
 
     static string QueueFile
     {
@@ -575,10 +581,20 @@ class MainForm : Form
             else         { pbFile.Value = 100; }
             lblPercent.Text = p + "%";
 
-            if (_fileChanged)
+            if (_fileChanged) { _fileChanged = false; }
+
+            // Update inline % prefix in the log for the current file line
+            if (_logFileLineStart >= 0 && p > 0 && p != _lastLogPct)
             {
-                _fileChanged = false;
+                _lastLogPct = p;
+                string pctStr = string.Format("{0,4}%  ", p); // always 7 chars
+                int savedEnd  = rtbLog.TextLength;
+                rtbLog.Select(_logFileLineStart, 7);
+                rtbLog.SelectionColor = C.Muted;
+                rtbLog.SelectedText   = pctStr;
+                rtbLog.Select(rtbLog.TextLength, 0);
             }
+
             if (f.Length > 0)
             {
                 long size        = System.Threading.Interlocked.Read(ref _latestFileSize);
@@ -601,10 +617,19 @@ class MainForm : Form
             else         { pbQueue.Value = 100; }
             lblQPct.Text = p + "%";
 
-            if (_qFileChanged)
+            if (_qFileChanged) { _qFileChanged = false; }
+
+            // Update inline % prefix in the queue log
+            if (_qLogFileLineStart >= 0 && p > 0 && p != _lastQLogPct)
             {
-                _qFileChanged = false;
+                _lastQLogPct = p;
+                string pctStr = string.Format("{0,4}%  ", p); // always 7 chars
+                rtbQLog.Select(_qLogFileLineStart, 7);
+                rtbQLog.SelectionColor = C.Muted;
+                rtbQLog.SelectedText   = pctStr;
+                rtbQLog.Select(rtbQLog.TextLength, 0);
             }
+
             if (f.Length > 0)
             {
                 long size        = System.Threading.Interlocked.Read(ref _qLatestFileSize);
@@ -1334,9 +1359,11 @@ class MainForm : Form
         try { proc.Kill(); } catch { }
 
         _qProgressTimer.Stop();
-        btnQStop.Enabled = false;
-        pbQueue.Value    = 0;
-        lblQPct.Text     = "";
+        _qLogFileLineStart = -1;
+        _lastQLogPct       = -1;
+        btnQStop.Enabled   = false;
+        pbQueue.Value      = 0;
+        lblQPct.Text       = "";
 
         string divider = new string('-', 60);
         AppendQLog("\n" + divider + "\n", C.Muted);
@@ -1422,11 +1449,13 @@ class MainForm : Form
             }
         }
 
-        _qLatestPct       = 0;
-        _qLatestFile      = "";
-        _qFileChanged     = false;
+        _qLatestPct        = 0;
+        _qLatestFile       = "";
+        _qFileChanged      = false;
+        _qLogFileLineStart = -1;
+        _lastQLogPct       = -1;
         System.Threading.Interlocked.Exchange(ref _qLatestFileSize, 0);
-        pbQueue.Value     = 0;
+        pbQueue.Value      = 0;
         lblQPct.Text      = "0%";
         lblQFile.Text     = "";
         _qProgressTimer.Start();
@@ -1469,9 +1498,11 @@ class MainForm : Form
                     if (t.EndsWith("%"))
                     {
                         string digits = t.TrimEnd('%').Trim();
-                        int pct;
-                        if (int.TryParse(digits, out pct) && pct >= 0 && pct <= 100)
-                            _qLatestPct = pct;
+                        double pctd;
+                        if (double.TryParse(digits, System.Globalization.NumberStyles.Any,
+                                            System.Globalization.CultureInfo.InvariantCulture, out pctd)
+                            && pctd >= 0 && pctd <= 100)
+                            _qLatestPct = (int)pctd;
                         return;
                     }
 
@@ -1512,17 +1543,19 @@ class MainForm : Form
         if (t.Length == 0) { AppendQLog("\n", C.Text); return; }
         if (t.EndsWith("%") && !t.Contains(" ")) return;
 
-        Color color = C.Text;
+        Color color      = C.Text;
+        bool  isFileLine = false;
 
-        if (t.IndexOf("New File",  StringComparison.OrdinalIgnoreCase) >= 0 ||
-            t.IndexOf("New Dir",   StringComparison.OrdinalIgnoreCase) >= 0)
+        if (t.IndexOf("New File", StringComparison.OrdinalIgnoreCase) >= 0)
+            { color = C.Green;  isFileLine = true; }
+        else if (t.IndexOf("New Dir", StringComparison.OrdinalIgnoreCase) >= 0)
             color = C.Green;
         else if (t.IndexOf("Newer",   StringComparison.OrdinalIgnoreCase) >= 0 ||
                  t.IndexOf("Older",   StringComparison.OrdinalIgnoreCase) >= 0 ||
                  t.IndexOf("Changed", StringComparison.OrdinalIgnoreCase) >= 0)
-            color = C.Yellow;
-        else if (t.IndexOf("*EXTRA",   StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 t.IndexOf("*Skipping",StringComparison.OrdinalIgnoreCase) >= 0)
+            { color = C.Yellow; isFileLine = true; }
+        else if (t.IndexOf("*EXTRA",    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 t.IndexOf("*Skipping", StringComparison.OrdinalIgnoreCase) >= 0)
             color = C.Muted;
         else if (t.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0 ||
                  t.IndexOf("ERROR",  StringComparison.OrdinalIgnoreCase) >= 0)
@@ -1536,16 +1569,28 @@ class MainForm : Form
                  t.StartsWith("Options"))
             color = C.Muted;
 
-        AppendQLog(line + "\n", color);
+        if (isFileLine)
+        {
+            _qLogFileLineStart = rtbQLog.TextLength;
+            _lastQLogPct       = -1;
+            AppendQLog("   0%  " + line + "\n", color);  // 7-char fixed prefix
+        }
+        else
+        {
+            _qLogFileLineStart = -1;
+            AppendQLog(line + "\n", color);
+        }
     }
 
     // ── Finish queue item ─────────────────────────────────────────────────────
     void FinishQueue(int rc, string logFile, QueueItem item)
     {
         _qProgressTimer.Stop();
-        _queueProcess    = null;
-        btnQStop.Enabled = false;
-        lblQFile.Text    = "";
+        _qLogFileLineStart = -1;
+        _lastQLogPct       = -1;
+        _queueProcess      = null;
+        btnQStop.Enabled   = false;
+        lblQFile.Text      = "";
         pbQueue.Value    = rc <= 7 ? 100 : 0;
         lblQPct.Text     = rc <= 7 ? "100%" : "";
         AppendQLog("\n");
@@ -2069,9 +2114,11 @@ class MainForm : Form
                     if (t.EndsWith("%"))
                     {
                         string digits = t.TrimEnd('%').Trim();
-                        int pct;
-                        if (int.TryParse(digits, out pct) && pct >= 0 && pct <= 100)
-                            _latestPct = pct;
+                        double pctd;
+                        if (double.TryParse(digits, System.Globalization.NumberStyles.Any,
+                                            System.Globalization.CultureInfo.InvariantCulture, out pctd)
+                            && pctd >= 0 && pctd <= 100)
+                            _latestPct = (int)pctd;
                         return;
                     }
 
@@ -2113,20 +2160,22 @@ class MainForm : Form
 
         if (t.EndsWith("%") && !t.Contains(" ")) return;
 
-        Color  color    = C.Text;
+        Color color      = C.Text;
+        bool  isFileLine = false;  // file copy lines get an inline % prefix
 
-        if (t.IndexOf("New File",  StringComparison.OrdinalIgnoreCase) >= 0 ||
-            t.IndexOf("New Dir",   StringComparison.OrdinalIgnoreCase) >= 0)
-            color = C.Green;
-        else if (t.IndexOf("Newer",  StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 t.IndexOf("Older",  StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 t.IndexOf("Changed",StringComparison.OrdinalIgnoreCase) >= 0)
-            color = C.Yellow;
-        else if (t.IndexOf("*EXTRA", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 t.IndexOf("*Skipping",StringComparison.OrdinalIgnoreCase)>= 0)
+        if (t.IndexOf("New File", StringComparison.OrdinalIgnoreCase) >= 0)
+            { color = C.Green;  isFileLine = true; }
+        else if (t.IndexOf("New Dir", StringComparison.OrdinalIgnoreCase) >= 0)
+            color = C.Green;   // directories: no % progress
+        else if (t.IndexOf("Newer",   StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 t.IndexOf("Older",   StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 t.IndexOf("Changed", StringComparison.OrdinalIgnoreCase) >= 0)
+            { color = C.Yellow; isFileLine = true; }
+        else if (t.IndexOf("*EXTRA",    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 t.IndexOf("*Skipping", StringComparison.OrdinalIgnoreCase) >= 0)
             color = C.Muted;
-        else if (t.IndexOf("FAILED",StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 t.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0)
+        else if (t.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 t.IndexOf("ERROR",  StringComparison.OrdinalIgnoreCase) >= 0)
             color = C.Red;
         else if (t.StartsWith("Dirs :") || t.StartsWith("Files :") ||
                  t.StartsWith("Bytes :") || t.StartsWith("Times :"))
@@ -2134,10 +2183,21 @@ class MainForm : Form
         else if (t.StartsWith("---") || t.StartsWith("ROBOCOPY") ||
                  t.StartsWith("Started") || t.StartsWith("Ended") ||
                  t.StartsWith("Source") || t.StartsWith("Dest") ||
-                 t.StartsWith("Files :") || t.StartsWith("Options"))
+                 t.StartsWith("Options"))
             color = C.Muted;
 
-        AppendLog(line + "\n", color);
+        if (isFileLine)
+        {
+            // Record where this line starts so the progress timer can update the prefix in-place
+            _logFileLineStart = rtbLog.TextLength;
+            _lastLogPct       = -1;
+            AppendLog("   0%  " + line + "\n", color);  // 7-char fixed prefix
+        }
+        else
+        {
+            _logFileLineStart = -1;  // non-file line; no inline % update
+            AppendLog(line + "\n", color);
+        }
     }
 
     static string ExtractName(string line)
@@ -2188,6 +2248,8 @@ class MainForm : Form
     void Finish(int rc, string logFile)
     {
         _progressTimer.Stop();
+        _logFileLineStart   = -1;
+        _lastLogPct         = -1;
         activeProcess       = null;
         _isRunning          = false;
         btnStop.Enabled     = false;
@@ -2267,6 +2329,8 @@ class MainForm : Form
         AppendLog("  STOPPED by user.\n", C.Red);
         AppendLog(divider + "\n", C.Muted);
 
+        _logFileLineStart = -1;
+        _lastLogPct       = -1;
         SetStatus("Stopped", C.Red);
         AddHistoryEntry(_syncSrc, _syncDst, _syncLabel, _syncMode, _syncStartTime, "Stopped", currentLogFile);
         SetSyncButtonsEnabled(true);
